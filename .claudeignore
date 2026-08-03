@@ -1,0 +1,57 @@
+# .claudeignore — reduce context window usage
+# Copied by gwt() into every new worktree
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+_build/
+
+# Python caches
+__pycache__/
+*.pyc
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+pytest-report.xml
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+
+# Dependencies
+node_modules/
+.ts-client-checkout/
+
+# IDE / tool state
+.idea/
+.vscode/
+.cursor/
+xcuserdata/
+.DS_Store
+
+# Large generated files
+*.whl
+*.tar.gz
+*.pte
+*.hmap
+
+# Docs build output
+docs/.docusaurus/
+docs/node_modules/
+docs/static/imported-files/
+docs/docs/api-deprecated/
+docs/docs/api-experimental/
+docs/docs/api/
+
+# Notebook checkpoints
+*.ipynb_checkpoints*
+
+# Logs
+server.log
+appmap.log
+
+# Git internals
+.git/
