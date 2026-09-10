@@ -1,21 +1,15 @@
 name: vLLM GPU Smoke
 
-# Manual GPU hello-world against Qwen/Qwen3-0.6B on a T4-class runner.
-# Intended for Ken's offered `gpu-t4-4-core` larger-runner shape (or equivalent).
-# Does not use the OGX ec2-github-runner / personal-PAT pattern.
+# Manual GPU hello-world against Qwen/Qwen3-0.6B on a dynamic EC2 GPU runner.
+# Provisions an ephemeral g4dn.xlarge instance via machulav/ec2-github-runner using AWS OIDC role.
+# Tears down the instance unconditionally on completion.
 
 on:
   workflow_dispatch:
-    inputs:
-      runner:
-        description: GitHub Actions runner label for the GPU host
-        required: true
-        default: gpu-t4-4-core
-        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions: {}
 
@@ -25,8 +19,38 @@ env:
   VLLM_MODEL: "Qwen/Qwen3-0.6B"
 
 jobs:
+  start-runner:
+    name: Start ephemeral EC2 GPU runner
+    runs-on: ubuntu-24.04
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      label: ${{ steps.start-ec2-runner.outputs.label }}
+      ec2-instance-id: ${{ steps.start-ec2-runner.outputs.ec2-instance-id }}
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e3ddf4a3c70b81927282e7806a74ba64ab497e47 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
+          role-session-name: praxis-gpu-smoke-start
+
+      - name: Start EC2 runner
+        id: start-ec2-runner
+        uses: machulav/ec2-github-runner@fcfb30c508638ca007871b69335805e2d1d07c08 # v2.3.9
+        with:
+          mode: start
+          github-token: ${{ secrets.PRAXIS_RUNNER_PAT }}
+          ec2-image-id: ${{ vars.AWS_GPU_AMI_ID }}
+          ec2-instance-type: g4dn.xlarge
+          subnet-id: ${{ vars.AWS_SUBNET_ID }}
+          security-group-id: ${{ vars.AWS_SECURITY_GROUP_ID }}
+
   vllm-gpu-hello:
-    runs-on: ${{ inputs.runner }}
+    name: Run vLLM GPU hello-world smoke
+    needs: start-runner
+    runs-on: ${{ needs.start-runner.outputs.label }}
     timeout-minutes: 45
     permissions:
       contents: read
@@ -38,9 +62,11 @@ jobs:
           nvidia-smi
           if command -v docker >/dev/null 2>&1; then
             echo "CONTAINER_RUNTIME=docker" >> "$GITHUB_ENV"
+            echo "GPU_FLAG=--gpus all" >> "$GITHUB_ENV"
             docker info >/dev/null
           elif command -v podman >/dev/null 2>&1; then
             echo "CONTAINER_RUNTIME=podman" >> "$GITHUB_ENV"
+            echo "GPU_FLAG=--device nvidia.com/gpu=all" >> "$GITHUB_ENV"
             podman info >/dev/null
           else
             echo "Neither docker nor podman is available on this runner" >&2
@@ -59,33 +85,18 @@ jobs:
 
       - name: Start vLLM on GPU
         run: |
-          if [ "$CONTAINER_RUNTIME" = "podman" ]; then
-            "$CONTAINER_RUNTIME" run -d --name vllm \
-              --device nvidia.com/gpu=all \
-              -p 8000:8000 \
-              -e HUGGING_FACE_HUB_TOKEN \
-              "$VLLM_IMAGE" \
-              --model "$VLLM_MODEL" \
-              --max-model-len 4096 \
-              --served-model-name "$VLLM_MODEL" \
-              --enable-auto-tool-choice \
-              --tool-call-parser hermes \
-              --reasoning-parser deepseek_r1 \
-              --gpu-memory-utilization 0.7
-          else
-            "$CONTAINER_RUNTIME" run -d --name vllm \
-              --gpus all \
-              -p 8000:8000 \
-              -e HUGGING_FACE_HUB_TOKEN \
-              "$VLLM_IMAGE" \
-              --model "$VLLM_MODEL" \
-              --max-model-len 4096 \
-              --served-model-name "$VLLM_MODEL" \
-              --enable-auto-tool-choice \
-              --tool-call-parser hermes \
-              --reasoning-parser deepseek_r1 \
-              --gpu-memory-utilization 0.7
-          fi
+          "$CONTAINER_RUNTIME" run -d --name vllm \
+            $GPU_FLAG \
+            -p 8000:8000 \
+            -e HUGGING_FACE_HUB_TOKEN \
+            "$VLLM_IMAGE" \
+            --model "$VLLM_MODEL" \
+            --max-model-len 4096 \
+            --served-model-name "$VLLM_MODEL" \
+            --enable-auto-tool-choice \
+            --tool-call-parser hermes \
+            --reasoning-parser deepseek_r1 \
+            --gpu-memory-utilization 0.7
 
       - name: Start OGX
         run: |
@@ -139,3 +150,27 @@ jobs:
           if [ -f /tmp/ogx.pid ]; then
             kill "$(cat /tmp/ogx.pid)" 2>/dev/null || true
           fi
+
+  stop-runner:
+    name: Stop ephemeral EC2 GPU runner
+    needs: [start-runner, vllm-gpu-hello]
+    runs-on: ubuntu-24.04
+    if: always()
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e3ddf4a3c70b81927282e7806a74ba64ab497e47 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-2' }}
+          role-session-name: praxis-gpu-smoke-stop
+
+      - name: Stop EC2 runner
+        uses: machulav/ec2-github-runner@fcfb30c508638ca007871b69335805e2d1d07c08 # v2.3.9
+        with:
+          mode: stop
+          github-token: ${{ secrets.PRAXIS_RUNNER_PAT }}
+          label: ${{ needs.start-runner.outputs.label }}
+          ec2-instance-id: ${{ needs.start-runner.outputs.ec2-instance-id }}
